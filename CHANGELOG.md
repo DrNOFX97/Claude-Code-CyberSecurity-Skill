@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Skill 13** — `tls_auditor.py`: the expired-certificate detail path was dead code for real expired certificates. `ssl.create_default_context()` raises `SSLCertVerificationError` at `wrap_socket()` *before* the expiry computation runs, so `cert_info["expired"]` never got set for a genuinely expired cert -- only the generic "Certificate validation failed" HIGH finding fired, and the dedicated CRITICAL "Certificate expired" branch in `_assess_vulnerabilities`/`_calculate_grade` was unreachable. Now re-checks expiry via an unverified connection (using the optional `cryptography` package, with a graceful skip if it's not installed) after a verification failure, so both findings fire correctly.
+
+---
+
 ## [3.0.0] — 2026-06-23
 
 ### Major Expansion — Four New Domains + Full Refresh of the Original 15
