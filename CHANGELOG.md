@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Skill 12** — `log_parser.py`/`anomaly_detector.py`: chaining these two tools exactly as this module's own docstring instructs ("Works on JSON output from log_parser.py") silently found zero anomalies on real auth_log input, no matter how anomalous. `log_parser.py`'s syslog/auth_log regex only captured timestamp/hostname/process/pid/message and never populated `src_ip`/`user`/`status`, which `anomaly_detector.py`'s brute-force/after-hours/lateral-movement detectors default to and require. Added auth_log message sub-parsing in `log_parser.py` to extract those three fields for common SSH/PAM message shapes (Failed/Accepted password, Invalid user).
+
+---
+
 ## [3.0.0] — 2026-06-23
 
 ### Major Expansion — Four New Domains + Full Refresh of the Original 15
