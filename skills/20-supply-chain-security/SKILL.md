@@ -171,7 +171,7 @@ python scripts/supply_chain_auditor.py --project-dir . --output audit.json
 python scripts/supply_chain_auditor.py --project-dir . --check-registry --output audit.json
 ```
 
-Covers `package.json`/lockfile presence (npm) and `requirements.txt` (PyPI) manifests, plus every workflow under `.github/workflows/`. Findings are heuristic near-misses and configuration gaps, not proof of compromise — always verify a flagged package by hand before treating it as malicious.
+Covers `package.json` (npm), `requirements.txt` (PyPI), `Cargo.toml` (crates.io), and `go.mod` (Go) manifests — lockfile presence, typosquatting, floating versions (npm/PyPI), and risky lifecycle scripts (npm) — plus every workflow under `.github/workflows/`. Findings are heuristic near-misses and configuration gaps, not proof of compromise — always verify a flagged package by hand before treating it as malicious.
 
 ---
 

@@ -47,6 +47,14 @@ POPULAR_PACKAGES = {
         "pyyaml", "click", "setuptools", "pip", "cryptography", "jinja2",
         "pillow", "pytest", "sqlalchemy", "scipy", "matplotlib",
     ],
+    "crates.io": [
+        "serde", "tokio", "rand", "clap", "reqwest", "regex", "log", "thiserror",
+        "anyhow", "syn", "quote", "libc", "rayon", "once_cell", "itertools",
+    ],
+    "Go": [
+        "gin", "echo", "cobra", "viper", "testify", "zap", "logrus", "grpc",
+        "protobuf", "uuid", "gorm", "chi", "errors", "mux",
+    ],
 }
 
 # Patterns that indicate a package lifecycle script is doing something a
@@ -120,12 +128,58 @@ class SupplyChainAuditor:
                     deps[name] = f"{op or ''}{version or '*'}"
         return deps
 
+    def parse_cargo_toml(self, filepath: str) -> Dict[str, str]:
+        """Lightweight [dependencies]-section parser (no full TOML parser required)."""
+        deps = {}
+        in_deps_section = False
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if re.match(r"^\[.*dependencies.*\]$", stripped, re.I):
+                    in_deps_section = True
+                    continue
+                if stripped.startswith("["):
+                    in_deps_section = False
+                    continue
+                if not in_deps_section or not stripped or stripped.startswith("#"):
+                    continue
+                match = re.match(r'^([A-Za-z0-9_\-]+)\s*=\s*"([^"]*)"', stripped)
+                if not match:
+                    match = re.match(r'^([A-Za-z0-9_\-]+)\s*=\s*\{.*version\s*=\s*"([^"]*)"', stripped)
+                if match:
+                    deps[match.group(1)] = match.group(2)
+        return deps
+
+    def parse_go_mod(self, filepath: str) -> Dict[str, str]:
+        """Extract module paths and versions from single-line and require(...) block forms."""
+        deps = {}
+        in_require_block = False
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.split("//", 1)[0].strip()
+                if stripped.startswith("require ("):
+                    in_require_block = True
+                    continue
+                if in_require_block and stripped == ")":
+                    in_require_block = False
+                    continue
+                if in_require_block:
+                    match = re.match(r"^(\S+)\s+(v[0-9]\S*)", stripped)
+                elif stripped.startswith("require "):
+                    match = re.match(r"^require\s+(\S+)\s+(v[0-9]\S*)", stripped)
+                else:
+                    match = None
+                if match:
+                    deps[match.group(1)] = match.group(2)
+        return deps
+
     # ---- Checks -------------------------------------------------------------
 
-    def check_typosquatting(self, deps: Dict[str, str], ecosystem: str, filepath: str):
+    def check_typosquatting(self, deps: Dict[str, str], ecosystem: str, filepath: str, key_fn=None):
         popular = POPULAR_PACKAGES.get(ecosystem, [])
         for name in deps:
-            normalized = name.lower()
+            candidate = key_fn(name) if key_fn else name
+            normalized = candidate.lower()
             if normalized in popular:
                 continue
             for known in popular:
@@ -137,6 +191,16 @@ class SupplyChainAuditor:
                         file=filepath, package=name, similar_to=known,
                     )
                     break
+
+    def check_lockfile_presence(self, project_dir: str, manifest_path: str, lockfile_names: List[str]):
+        has_lockfile = any(os.path.exists(os.path.join(project_dir, lf)) for lf in lockfile_names)
+        if not has_lockfile:
+            self._add(
+                "SC-009", "HIGH", f"No lockfile committed alongside {os.path.basename(manifest_path)}",
+                f"Without {'/'.join(lockfile_names)}, installs are not reproducible and "
+                "transitive versions/hashes can drift or be swapped",
+                file=manifest_path,
+            )
 
     def check_floating_versions(self, deps: Dict[str, str], filepath: str):
         for name, version in deps.items():
@@ -175,13 +239,15 @@ class SupplyChainAuditor:
         url_map = {
             "npm": "https://registry.npmjs.org/{}",
             "PyPI": "https://pypi.org/pypi/{}/json",
+            "crates.io": "https://crates.io/api/v1/crates/{}",
         }
         url_template = url_map.get(ecosystem)
         if not url_template:
             return
+        headers = {"User-Agent": "supply_chain_auditor.py (Claude-Code-CyberSecurity-Skill)"}
         for name in deps:
             try:
-                resp = requests.get(url_template.format(name), timeout=10)
+                resp = requests.get(url_template.format(name), timeout=10, headers=headers)
                 if resp.status_code == 404:
                     self._add(
                         "SC-005", "HIGH", "Dependency not found on public registry",
@@ -261,17 +327,10 @@ class SupplyChainAuditor:
         package_json = os.path.join(project_dir, "package.json")
         if os.path.exists(package_json):
             parsed = self.parse_package_json(package_json)
-            has_lockfile = any(
-                os.path.exists(os.path.join(project_dir, lf))
-                for lf in ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml")
+            self.check_lockfile_presence(
+                project_dir, package_json,
+                ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"],
             )
-            if not has_lockfile:
-                self._add(
-                    "SC-009", "HIGH", "No lockfile committed alongside package.json",
-                    "Without package-lock.json/yarn.lock/pnpm-lock.yaml, installs are not reproducible "
-                    "and transitive versions can drift or be swapped",
-                    file=package_json,
-                )
             self.check_typosquatting(parsed["deps"], "npm", package_json)
             self.check_floating_versions(parsed["deps"], package_json)
             self.check_lifecycle_scripts(parsed["scripts"], package_json)
@@ -283,6 +342,19 @@ class SupplyChainAuditor:
             self.check_typosquatting(deps, "PyPI", requirements_txt)
             self.check_floating_versions(deps, requirements_txt)
             self.check_registry_existence(deps, "PyPI", requirements_txt)
+
+        cargo_toml = os.path.join(project_dir, "Cargo.toml")
+        if os.path.exists(cargo_toml):
+            deps = self.parse_cargo_toml(cargo_toml)
+            self.check_lockfile_presence(project_dir, cargo_toml, ["Cargo.lock"])
+            self.check_typosquatting(deps, "crates.io", cargo_toml)
+            self.check_registry_existence(deps, "crates.io", cargo_toml)
+
+        go_mod = os.path.join(project_dir, "go.mod")
+        if os.path.exists(go_mod):
+            deps = self.parse_go_mod(go_mod)
+            self.check_lockfile_presence(project_dir, go_mod, ["go.sum"])
+            self.check_typosquatting(deps, "Go", go_mod, key_fn=lambda m: m.rsplit("/", 1)[-1])
 
         self.check_github_actions(os.path.join(project_dir, ".github", "workflows"))
 
